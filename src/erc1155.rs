@@ -53,12 +53,12 @@ pub trait ERC1155MetadataURIExt<AccountId>: ERC1155MetadataURI<AccountId> {
 }
 
 pub trait ERC1155Mintable<AccountId>: ERC1155<AccountId> {
-    fn mint(account: &AccountId, id: &Self::TokenId, amount: Self::Balance, calldata: Vec<u8>) -> Result<Self::PositiveImbalance, DispatchError>;
+    fn mint(account: &AccountId, id: &Self::TokenId, amount: Self::Balance, calldata: Option<Vec<u8>>) -> Result<Self::PositiveImbalance, DispatchError>;
 
     fn mint_batch(
         account: &AccountId,
         id_amounts: impl Iterator<Item = impl AsRef<(Self::TokenId, Self::Balance)>>,
-        calldata: Vec<u8>
+        calldata: Option<Vec<u8>>
     ) -> DispatchResult {
         for v in id_amounts {
             let (id, amount) = v.as_ref();

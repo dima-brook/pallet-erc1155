@@ -199,7 +199,7 @@ impl<T: Config> ERC1155Mintable<T::AccountId> for pallet::Pallet<T> {
         account: &T::AccountId,
         id: &Self::TokenId,
         amount: Self::Balance,
-        _calldata: Vec<u8>
+        _calldata: Option<Vec<u8>>
     ) -> Result<Self::PositiveImbalance, DispatchError> {
         ensure!(
             *account != T::AccountId::default(),
