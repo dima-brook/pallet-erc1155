@@ -1,6 +1,6 @@
-use crate::{Config, Balances, Issuance, Error, imbalance::{PositiveImbalance, NegativeImbalance}};
+use crate::{Config, Balances, Event, Issuance, Error, imbalance::{PositiveImbalance, NegativeImbalance}, Pallet};
 use sp_runtime::{traits::{Zero, CheckedAdd, CheckedSub, Saturating, Bounded}};
-use frame_support::{traits::{Currency, Get, Imbalance, WithdrawReasons, ExistenceRequirement, SignedImbalance}, pallet_prelude::PhantomData, dispatch::{DispatchResult, DispatchError}};
+use frame_support::{traits::{Currency, Get, WithdrawReasons, ExistenceRequirement, SignedImbalance}, pallet_prelude::PhantomData, dispatch::{DispatchResult, DispatchError}};
 
 pub struct Erc1155Token<T: Config, Inner: Get<T::TokenId>>(PhantomData<T>, PhantomData<Inner>);
 
@@ -23,8 +23,8 @@ where
     I: Get<T::TokenId>
 {
     type Balance = T::Balance;
-    type PositiveImbalance = PositiveImbalance<T, I>;
-    type NegativeImbalance = NegativeImbalance<T, I>;
+    type PositiveImbalance = PositiveImbalance<T>;
+    type NegativeImbalance = NegativeImbalance<T>;
 
     fn total_balance(who: &T::AccountId) -> Self::Balance {
         <Balances<T>>::get(who, Self::get()).clone().unwrap_or(T::Balance::zero())
@@ -44,7 +44,7 @@ where
 
     fn burn(amount: Self::Balance) -> Self::PositiveImbalance {
         if amount.is_zero() {
-            return Self::PositiveImbalance::zero();
+            return Self::PositiveImbalance::new(0u32.into(), Self::get());
         }
 
         let mut res = amount;
@@ -58,12 +58,12 @@ where
                 }));
         });
 
-        Self::PositiveImbalance::new(amount)
+        Self::PositiveImbalance::new(amount, Self::get())
     }
 
     fn issue(amount: Self::Balance) -> Self::NegativeImbalance {
         if amount.is_zero() {
-            return Self::NegativeImbalance::zero();
+            return Self::NegativeImbalance::new(0u32.into(), Self::get());
         }
 
         let mut res = amount;
@@ -77,7 +77,7 @@ where
                 }));
         });
 
-        Self::NegativeImbalance::new(amount)
+        Self::NegativeImbalance::new(amount, Self::get())
     }
 
     fn free_balance(who: &T::AccountId) -> Self::Balance {
@@ -101,7 +101,7 @@ where
         from: &T::AccountId,
         to: &T::AccountId,
         value: Self::Balance,
-        existence_requirement: ExistenceRequirement
+        _existence_requirement: ExistenceRequirement
     ) -> DispatchResult {
         if value.is_zero() || from == to {
             return Ok(())
@@ -119,8 +119,8 @@ where
             Ok(())
         })?;
 
-        // TODO: Deposit Event
-        
+        <Pallet<T>>::deposit_event(Event::TransferSingle(Some(from.clone()), Some(to.clone()), Self::get(), value));
+ 
         Ok(())
     }
 
@@ -128,12 +128,18 @@ where
         who: &T::AccountId,
         value: Self::Balance
     ) -> (Self::NegativeImbalance, Self::Balance) {
+        let ret = |slashed, remaining| {
+            <Pallet<T>>::deposit_event(Event::TransferSingle(Some(who.clone()), None, Self::get(), slashed));
+            
+            (NegativeImbalance::new(slashed, Self::get()), remaining)
+        };
+
         if value.is_zero() {
-            return (NegativeImbalance::zero(), Self::Balance::zero());
+            return ret(T::Balance::zero(), Self::Balance::zero());
         }
 
         if Self::total_balance(who).is_zero() {
-            return (NegativeImbalance::zero(), value);
+            return ret(T::Balance::zero(), value);
         }
 
         <Balances<T>>::mutate(who, Self::get(), |balance| {
@@ -150,7 +156,7 @@ where
                 slashed = value;
             }
 
-            (NegativeImbalance::new(slashed), remaining)
+            ret(slashed, remaining)
         })
     }
 
@@ -158,12 +164,12 @@ where
         who: &T::AccountId,
         value: Self::Balance
     ) -> Result<Self::PositiveImbalance, DispatchError> {
-        if value.is_zero() { return Ok(PositiveImbalance::zero()) }
+        if value.is_zero() { return Ok(PositiveImbalance::new(0u32.into(), Self::get())) }
 
         <Balances<T>>::try_mutate(who, Self::get(), |balance| {
             // checked add?
             *balance = Some(balance.ok_or(Error::<T>::AccountNotFound)?.saturating_add(value));
-            Ok(PositiveImbalance::new(value))
+            Ok(PositiveImbalance::new(value, Self::get()))
         })
     }
 
@@ -171,12 +177,12 @@ where
         who: &T::AccountId,
         value: Self::Balance
     ) -> Self::PositiveImbalance {
-        if value.is_zero() { return PositiveImbalance::zero() }
+        if value.is_zero() { return PositiveImbalance::new(0u32.into(), Self::get()) }
 
         <Balances<T>>::mutate(who, Self::get(), |balance| {
             // checked add?
             *balance = Some(balance.unwrap_or(Self::Balance::zero()).saturating_add(value));
-            PositiveImbalance::new(value)
+            PositiveImbalance::new(value, Self::get())
         })
     }
 
@@ -192,7 +198,7 @@ where
                 .flatten()
                 .ok_or(Error::<T>::OutOfFunds)?);
 
-            Ok(Self::NegativeImbalance::new(value))
+            Ok(Self::NegativeImbalance::new(value, Self::get()))
         })
     }
 
@@ -200,9 +206,9 @@ where
         <Balances<T>>::mutate(who, Self::get(), |balance| {
             let bal = balance.unwrap_or(T::Balance::zero());
             let im = if value > bal {
-                SignedImbalance::Negative(NegativeImbalance::new(value - bal))
+                SignedImbalance::Negative(NegativeImbalance::new(value - bal, Self::get()))
             } else {
-                SignedImbalance::Positive(PositiveImbalance::new(bal - value))
+                SignedImbalance::Positive(PositiveImbalance::new(bal - value, Self::get()))
             };
             *balance = Some(value);
 

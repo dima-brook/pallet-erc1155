@@ -3,14 +3,18 @@
 pub(crate) mod imbalance;
 pub mod weights;
 pub mod token;
+pub mod erc1155;
 
 pub use pallet::*;
+use erc1155::*;
 
 use codec::{Codec};
 use sp_std::fmt::Debug;
 use weights::WeightInfo;
-use frame_system::pallet_prelude::BlockNumberFor;
-use sp_runtime::traits::{Saturating, AtLeast32BitUnsigned, StaticLookup};
+use frame_support::{dispatch::{DispatchResult, DispatchError}, ensure};
+use frame_system::{pallet_prelude::BlockNumberFor};
+use sp_runtime::traits::{Saturating, AtLeast32BitUnsigned, StaticLookup, Zero, CheckedSub};
+
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -58,7 +62,7 @@ pub mod pallet {
         /// to is None when burning
         ///
         /// from, to, token_id, value
-        Transfer(Option<T::AccountId>, Option<T::AccountId>, T::TokenId, T::Balance)
+        TransferSingle(Option<T::AccountId>, Option<T::AccountId>, T::TokenId, T::Balance)
 	}
 
 	#[pallet::error]
@@ -74,15 +78,16 @@ pub mod pallet {
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
         #[pallet::weight(T::WeightInfo::transfer())]
-        pub fn safe_transfer_from(
+        pub fn safe_transfer(
             from: OriginFor<T>,
             to: <T::Lookup as StaticLookup>::Source,
             token_id: T::TokenId,
             #[pallet::compact] value: T::Balance
         ) -> DispatchResultWithPostInfo {
-            //let sender = ensure_signed(from)?;
-            //let recv = T::Lookup::lookup(to)?;
-            //<token::Erc1155Token<T, token_id>>::transfer(sender, recv);
+            let sender = ensure_signed(from)?;
+            let recv = T::Lookup::lookup(to)?;
+
+            Self::safe_transfer_from(&sender, &recv, &token_id, value, None)?;
             Ok(().into())
         }
 	}
@@ -129,9 +134,107 @@ impl<T: Config> pallet::Pallet<T> {
 
     fn token_inc() -> T::TokenId {
         // unwrap safety: initialized at genesis_build
-        let token = <LastTokenId<T>>::get().unwrap();
+        let token = Self::last_token();
         <LastTokenId<T>>::put(token.saturating_add(1u32.into()));
 
         return token;
+    }
+}
+
+impl<T: Config> ERC1155<T::AccountId> for pallet::Pallet<T> {
+    type TokenId = T::TokenId;
+    type Balance = T::Balance;
+    type PositiveImbalance = imbalance::PositiveImbalance<T>;
+    type NegativeImbalance = imbalance::NegativeImbalance<T>;
+
+    fn safe_transfer_from(
+        from: &T::AccountId,
+        to: &T::AccountId,
+        id: &T::TokenId,
+        value: T::Balance,
+        _calldata: Option<Vec<u8>>
+    ) -> DispatchResult {
+        ensure!(
+            *to != T::AccountId::default(),
+            Error::<T>::AccountNotFound
+        );
+
+        if value.is_zero() || from == to {
+            return Ok(());
+        }
+
+        <Balances<T>>::try_mutate(from, *id, |balance| -> Result<(), Error<T>> {
+            *balance = Some(balance.map(|b| b.checked_sub(&value))
+                .flatten()
+                .ok_or(Error::<T>::OutOfFunds)?);
+            <Balances<T>>::mutate(to, *id, |balance_target| {
+                // Should we consider checked add?
+                *balance_target = Some(balance.unwrap().saturating_add(value));
+            });
+
+            Ok(())
+        })?;
+
+        Self::deposit_event(Event::TransferSingle(Some(from.clone()), Some(to.clone()), *id, value));
+        // TODO: Handle ERC1155Receiver
+
+        Ok(())
+    }
+
+    fn balance_of(owner: &T::AccountId, id: &Self::TokenId) -> Self::Balance {
+        <Balances<T>>::get(owner, id).clone().unwrap_or(T::Balance::zero())
+    }
+
+    fn set_approval_for_all(_owner: &T::AccountId, _approved: bool) {
+        unimplemented!();
+    }
+
+    fn is_approved_for_all(_owner: &T::AccountId, _operator: &T::AccountId) -> bool {
+        unimplemented!();
+    }
+}
+
+impl<T: Config> ERC1155Mintable<T::AccountId> for pallet::Pallet<T> {
+    fn mint(
+        account: &T::AccountId,
+        id: &Self::TokenId,
+        amount: Self::Balance,
+        _calldata: Vec<u8>
+    ) -> Result<Self::PositiveImbalance, DispatchError> {
+        ensure!(
+            *account != T::AccountId::default(),
+            Error::<T>::AccountNotFound
+        );
+
+        if amount.is_zero() {
+            return Ok(Self::PositiveImbalance::new(0u32.into(), *id))
+        }
+
+        let res = <Balances<T>>::mutate(account, id, |balance| {
+            // checked add?
+            *balance = Some(balance.unwrap_or(Self::Balance::zero()).saturating_add(amount));
+            Self::PositiveImbalance::new(amount, *id)
+        });
+
+        // TODO: ERC115Receiver
+        Ok(res)
+    }
+}
+
+impl<T: Config> ERC1155Burnable<T::AccountId> for pallet::Pallet<T> {
+    fn burn(
+        account: &T::AccountId,
+        id: &Self::TokenId,
+        amount: Self::Balance
+    ) -> Result<Self::NegativeImbalance, DispatchError> {
+        <Balances<T>>::try_mutate(account, id, |balance| {
+            *balance = Some(balance
+                .map(|b| b.checked_sub(&amount))
+                .flatten()
+                .ok_or(Error::<T>::OutOfFunds)?);
+
+            Ok(Self::NegativeImbalance::new(amount, *id))
+        })
+
     }
 }
